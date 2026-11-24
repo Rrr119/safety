@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple, Callable
 from safety.constants import EXIT_CODE_VULNERABILITIES_FOUND, DEFAULT_EPILOG
 from safety.safety import process_fixes_scan
 from safety.scan.validators import output_callback, save_as_callback
-from safety.util import pluralize
+from safety.util import has_explicit_database_source, pluralize
 from ..cli_util import CustomContext, SafetyCLICommand, SafetyCLISubGroup
 from safety.error_handlers import handle_cmd_exception
 from rich.padding import Padding
@@ -459,7 +459,11 @@ def validate_authentication(ctx: typer.Context) -> None:
     Raises:
         SafetyError: If the user is not authenticated.
     """
-    if not ctx.obj.metadata.authenticated:
+    if not ctx.obj.metadata.authenticated and not has_explicit_database_source(
+        db=getattr(ctx.obj, "db", None),
+        index_url=getattr(ctx.obj, "db_index_url", None),
+        offline=getattr(ctx.obj, "offline", False),
+    ):
         raise SafetyError(MSG_AUTH_REQUIRED)
 
 
@@ -525,11 +529,16 @@ def initialize_file_finder(
     # Download necessary assets for each handler
     for handler in file_finder.handlers:
         if handler.ecosystem:
+            handler_kwargs = {
+                "db": getattr(ctx.obj, "db", None),
+                "index_url": getattr(ctx.obj, "db_index_url", None),
+                "offline": getattr(ctx.obj, "offline", False),
+            }
             if console:
                 with console.status(WAIT_MSG_FETCHING_DB, spinner=DEFAULT_SPINNER):
-                    handler.download_required_assets(ctx.obj.auth)
+                    handler.download_required_assets(ctx.obj.auth, **handler_kwargs)
             else:
-                handler.download_required_assets(ctx.obj.auth)
+                handler.download_required_assets(ctx.obj.auth, **handler_kwargs)
 
     return file_finder
 
@@ -876,6 +885,33 @@ def scan(
             show_default=False,
         ),
     ] = None,
+    db: Annotated[
+        Optional[str],
+        typer.Option(
+            "--db",
+            help="Path to a local or remote vulnerability database.",
+            show_default=False,
+        ),
+    ] = None,
+    db_index_url: Annotated[
+        Optional[str],
+        typer.Option(
+            "--index-url",
+            "--db-index-url",
+            envvar=["SAFETY_DB_URL", "SAFETY_DB_INDEX_URL", "SAFETY_INDEX_URL"],
+            help="Base URL of a private vulnerability database index, or a full database JSON URL.",
+            show_default=False,
+        ),
+    ] = None,
+    offline: Annotated[
+        bool,
+        typer.Option(
+            "--offline",
+            envvar="SAFETY_OFFLINE",
+            help="Never access the network; use --db, SAFETY_DB_DIR, or the local cache.",
+            show_default=False,
+        ),
+    ] = False,
     apply_updates: Annotated[
         bool, typer.Option("--apply-fixes", help=SCAN_APPLY_FIXES, show_default=False)
     ] = False,
@@ -895,6 +931,10 @@ def scan(
     """
     Scans a project (defaulted to the current directory) for supply-chain security and configuration issues
     """
+
+    ctx.obj.db = db
+    ctx.obj.db_index_url = db_index_url
+    ctx.obj.offline = offline
 
     # Step 1: Validate inputs and initialize settings
     validate_authentication(ctx)

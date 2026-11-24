@@ -1,9 +1,9 @@
-import os
 from pathlib import Path
 from typing import Optional, Tuple, TYPE_CHECKING
 import typer
 from safety.scan.models import ScanExport, ScanOutput
 from safety.errors import SafetyException
+from safety.util import has_explicit_database_source
 
 
 if TYPE_CHECKING:
@@ -85,7 +85,11 @@ def fail_if_not_allowed_stage(ctx: "SafetyContext"):
     stage = ctx.obj.auth.stage
     auth_type: AuthenticationType = ctx.obj.auth.platform.get_authentication_type()
 
-    if os.getenv("SAFETY_DB_DIR"):
+    if has_explicit_database_source(
+        db=getattr(ctx.obj, "db", None),
+        index_url=getattr(ctx.obj, "db_index_url", None),
+        offline=getattr(ctx.obj, "offline", False),
+    ):
         return
 
     if not stage or not auth_type.is_allowed_in(stage):

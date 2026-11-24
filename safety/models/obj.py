@@ -35,6 +35,9 @@ class SafetyCLI:
     platform_enabled: bool = False
     firewall_enabled: bool = False
     events_enabled: bool = False
+    db: Optional[str] = None
+    db_index_url: Optional[str] = None
+    offline: bool = False
     event_bus: Optional["EventBus"] = None
     security_events_handler: Optional["SecurityEventsHandler"] = None
     correlation_id: Optional[str] = None

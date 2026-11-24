@@ -57,7 +57,14 @@ class Auth:
         Returns:
             bool: True if valid, False otherwise.
         """
-        if os.getenv("SAFETY_DB_DIR"):
+        if (
+            os.getenv("SAFETY_DB_DIR")
+            or os.getenv("SAFETY_DB_URL")
+            or os.getenv("SAFETY_DB_INDEX_URL")
+            or os.getenv("SAFETY_INDEX_URL")
+            or os.getenv("SAFETY_OFFLINE", "").strip().lower()
+            in {"1", "true", "yes", "on"}
+        ):
             return True
 
         if not self.platform:

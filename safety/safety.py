@@ -12,6 +12,7 @@ import time
 from collections import defaultdict
 from datetime import datetime
 from typing import Dict, Optional, List, Any, Union, Iterator
+from urllib.parse import urlsplit
 
 from authlib.integrations.base_client.errors import OAuthError
 import httpx
@@ -77,6 +78,10 @@ from .util import (
     SafetyContext,
     validate_expiration_date,
     is_a_remote_mirror,
+    is_a_file_url,
+    file_url_to_path,
+    is_offline_mode,
+    extract_database_metadata,
     get_requirements_content,
     SafetyPolicyFile,
     get_terminal_size,
@@ -208,6 +213,64 @@ def write_to_cache(db_name: str, data: Dict[str, Any]) -> None:
             LOG.debug("Safety updated the cache file for %s database.", db_name)
 
 
+def build_database_url(mirror: str, db_name: str) -> str:
+    """
+    Build the URL for a database file hosted by a mirror or private index.
+
+    A caller may provide either a base URL or the full URL of a JSON database.
+    Base URLs are joined without dropping an existing path component, which
+    is important for private indexes such as https://example.test/safety.
+
+    Args:
+        mirror (str): The mirror/index base URL or a complete database URL.
+        db_name (str): The database filename.
+
+    Returns:
+        str: The database URL.
+    """
+    parsed = urlsplit(mirror)
+    if parsed.path.rstrip("/").endswith(".json"):
+        return mirror
+
+    if parsed.query or parsed.fragment:
+        base = mirror.split("?", 1)[0].split("#", 1)[0]
+    else:
+        base = mirror
+
+    return f"{base.rstrip('/')}/{db_name}"
+
+
+def record_database_metadata(
+    db: Dict[str, Any], source: str, offline: bool = False
+) -> None:
+    """
+    Store the loaded database version and source in the Safety context.
+
+    Args:
+        db (Dict[str, Any]): The loaded vulnerability database.
+        source (str): The local path or URL used to load the database.
+        offline (bool): Whether the database was loaded without network access.
+    """
+    context = SafetyContext()
+    metadata = extract_database_metadata(db, source=source)
+    for key, value in metadata.items():
+        setattr(context, key, value)
+    context.database_offline = offline
+
+
+def load_database_from_cache(db_name: str) -> Optional[Dict[str, Any]]:
+    """
+    Load a cached database without enforcing the cache TTL.
+
+    Args:
+        db_name (str): The database filename.
+
+    Returns:
+        Optional[Dict[str, Any]]: The cached database, if available.
+    """
+    return get_from_cache(db_name=db_name, skip_time_verification=True)
+
+
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential_jitter(initial=0.2, max=8.0, exp_base=3, jitter=0.3),
@@ -257,7 +320,7 @@ def fetch_database_url(
         if cached_data:
             LOG.info("Database %s returned from cache.", db_name)
             return cached_data
-    url = mirror + db_name
+    url = build_database_url(mirror, db_name)
 
     telemetry_data = {
         "telemetry": json.dumps(
@@ -295,6 +358,9 @@ def fetch_database_url(
     if r.status_code == 429:
         raise TooManyRequestsError(reason=r.text)
 
+    if r.status_code == 404:
+        raise DatabaseFetchError(f"Vulnerability database was not found at {url}")
+
     if r.status_code >= 500 and r.status_code < 600:
         raise ServerError(reason=r.reason)
 
@@ -325,22 +391,37 @@ def fetch_database_file(
     Returns:
         Dict[str, Any]: The fetched database.
     """
-    full_path = (
-        (Path(path) / (ecosystem.value if ecosystem else "") / db_name)
-        .expanduser()
-        .resolve()
-    )
+    path = str(path)
+    if is_a_file_url(path):
+        path = file_url_to_path(path)
+
+    source_path = Path(path).expanduser().resolve()
+    if source_path.is_file():
+        full_path = source_path
+    else:
+        relative_path = (
+            Path(ecosystem.value, db_name) if ecosystem else Path(db_name)
+        )
+        full_path = source_path / relative_path
+        if not full_path.exists():
+            fallback_path = source_path / db_name
+            if fallback_path.exists():
+                full_path = fallback_path
 
     if not full_path.exists():
         raise DatabaseFileNotFoundError(db=path)
 
-    with open(full_path) as f:
-        data = json.loads(f.read())
+    try:
+        with open(full_path) as f:
+            data = json.loads(f.read())
+    except json.JSONDecodeError as e:
+        raise MalformedDatabase(fetched_from=str(full_path), reason=str(e))
 
     if cached:
         LOG.info("Writing %s to cache because cached value was %s", db_name, cached)
         write_to_cache(db_name, data)
 
+    record_database_metadata(data, source=str(full_path))
     return data
 
 
@@ -363,6 +444,114 @@ def is_valid_database(db: Dict[str, Any]) -> bool:
     return False
 
 
+def ensure_full_database(
+    db: Dict[str, Any], full: bool
+) -> Dict[str, Any]:
+    """
+    Normalize a short database into a full-compatible structure when needed.
+
+    The short database format stores a list of vulnerable specifiers, while
+    the full format stores advisory objects. Supporting a single-file offline
+    database means callers may only have the short format, so we build a
+    minimal full-compatible representation instead of failing the scan.
+
+    Args:
+        db (Dict[str, Any]): The database.
+        full (bool): Whether the full database was requested.
+
+    Returns:
+        Dict[str, Any]: A database suitable for full-database consumers.
+    """
+    if not full:
+        return db
+
+    vulnerable_packages = db.get("vulnerable_packages", {})
+    if not isinstance(vulnerable_packages, dict):
+        return db
+
+    needs_normalization = any(
+        isinstance(entry, str)
+        for entries in vulnerable_packages.values()
+        if isinstance(entries, list)
+        for entry in entries
+    )
+    if not needs_normalization:
+        return db
+
+    normalized = dict(db)
+    normalized["meta"] = dict(db.get("meta", {}))
+    normalized["vulnerable_packages"] = {}
+    for package_name, entries in vulnerable_packages.items():
+        normalized["vulnerable_packages"][package_name] = [
+            {"specs": [entry], "advisory": "", "transitive": False, "ids": []}
+            if isinstance(entry, str)
+            else entry
+            for entry in entries
+        ]
+
+    return normalized
+
+
+def ensure_short_database(db: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Normalize a full database into the short lookup format when needed.
+
+    This allows an offline deployment to provide a single full database file
+    through --db while keeping the existing check command's short-database
+    lookups working.
+
+    Args:
+        db (Dict[str, Any]): The database.
+
+    Returns:
+        Dict[str, Any]: A database suitable for short-database consumers.
+    """
+    vulnerable_packages = db.get("vulnerable_packages", {})
+    if not isinstance(vulnerable_packages, dict):
+        return db
+
+    needs_normalization = any(
+        isinstance(entry, dict) and "specs" in entry
+        for entries in vulnerable_packages.values()
+        if isinstance(entries, list)
+        for entry in entries
+    )
+    if not needs_normalization:
+        return db
+
+    normalized = dict(db)
+    normalized["vulnerable_packages"] = {}
+    for package_name, entries in vulnerable_packages.items():
+        specs = []
+        for entry in entries:
+            if isinstance(entry, dict):
+                specs.extend(entry.get("specs", []))
+            elif isinstance(entry, str):
+                specs.append(entry)
+        normalized["vulnerable_packages"][package_name] = specs
+
+    return normalized
+
+
+def normalize_database_format(
+    db: Dict[str, Any], full: bool
+) -> Dict[str, Any]:
+    """
+    Normalize a database to the format expected for the requested fetch.
+
+    Args:
+        db (Dict[str, Any]): The database.
+        full (bool): Whether the full database was requested.
+
+    Returns:
+        Dict[str, Any]: The normalized database.
+    """
+    db = ensure_full_database(db, full)
+    if not full:
+        db = ensure_short_database(db)
+    return db
+
+
 def fetch_database(
     auth: "Auth",
     full: bool = False,
@@ -371,6 +560,8 @@ def fetch_database(
     telemetry: bool = True,
     ecosystem: Optional[Ecosystem] = None,
     from_cache: bool = True,
+    index_url: Optional[str] = None,
+    offline: bool = False,
 ) -> Dict[str, Any]:
     """
     Fetches the database from a mirror or a local file.
@@ -384,55 +575,135 @@ def fetch_database(
         telemetry (bool): Whether to include telemetry data.
         ecosystem (Optional[Ecosystem]): The ecosystem.
         from_cache (bool): Whether to fetch from cache.
+        index_url (Optional[str]): A private database index base URL or JSON URL.
+        offline (bool): Whether to disable network access.
 
     Returns:
         Dict[str, Any]: The fetched database.
     """
     from safety.utils.auth_session import AuthenticationType
 
-    if auth.platform.get_authentication_type() == AuthenticationType.machine_token:
+    db_name = "insecure_full.json" if full else "insecure.json"
+    offline = is_offline_mode(offline)
+    requested_index_url = index_url
+    requested_db = db
+    index_url = (
+        requested_index_url
+        or os.getenv("SAFETY_DB_URL")
+        or os.getenv("SAFETY_DB_INDEX_URL")
+        or os.getenv("SAFETY_INDEX_URL")
+        or None
+    )
+    env_db = os.getenv("SAFETY_DB_DIR") or None
+    db = requested_db or env_db
+    if db and not isinstance(db, str):
+        db = str(db)
+    if index_url and not isinstance(index_url, str):
+        index_url = str(index_url)
+
+    is_open_mirror = False
+    if requested_index_url:
+        mirrors = [index_url]
+    elif requested_db:
+        mirrors = [db]
+    elif index_url:
+        mirrors = [index_url]
+    elif db:
+        mirrors = [db]
+    elif offline:
+        mirrors = []
+    elif auth.platform.is_using_auth_credentials():
+        mirrors = API_MIRRORS
+    else:
+        is_open_mirror = True
+        mirrors = OPEN_MIRRORS
+
+    using_local_database = any(not is_a_remote_mirror(mirror) for mirror in mirrors)
+    using_network_database = any(
+        is_a_remote_mirror(mirror) for mirror in mirrors
+    ) and not offline
+    using_explicit_database_source = bool(index_url or db)
+    if (
+        auth.platform.get_authentication_type() == AuthenticationType.machine_token
+        and using_network_database
+        and not using_local_database
+        and not using_explicit_database_source
+    ):
         raise DatabaseFetchError(
             "Machine token authentication is not accepted for this operation. "
             "Run `safety auth login` or use `--key` to authenticate."
         )
 
-    is_open_mirror = False
-    if auth.platform.is_using_auth_credentials():
-        mirrors = API_MIRRORS
-    elif db:
-        mirrors = [db]
-    else:
-        is_open_mirror = True
-        mirrors = OPEN_MIRRORS
+    def use_cached_database() -> Optional[Dict[str, Any]]:
+        cached_data = load_database_from_cache(db_name)
+        if not cached_data:
+            return None
 
-    db_name = "insecure_full.json" if full else "insecure.json"
+        LOG.info(
+            "Using cached database %s because network access is unavailable.", db_name
+        )
+        cached_data = normalize_database_format(cached_data, full)
+        if is_valid_database(cached_data):
+            record_database_metadata(
+                cached_data, source=f"cache:{db_name}", offline=True
+            )
+            return cached_data
+        return None
+
     for mirror in mirrors:
         # mirror can either be a local path or a URL
         if is_a_remote_mirror(mirror):
+            if offline:
+                cached_data = use_cached_database()
+                if cached_data:
+                    return cached_data
+                raise DatabaseFetchError(
+                    "Offline mode is enabled and no cached vulnerability "
+                    f"database ({db_name}) is available."
+                )
             if ecosystem is None:
                 ecosystem = Ecosystem.PYTHON
-            data = fetch_database_url(
-                auth.platform.http_client,
-                mirror,
-                db_name=db_name,
-                cached=cached,
-                telemetry=telemetry,
-                ecosystem=ecosystem,
-                from_cache=from_cache,
-                is_open_mirror=is_open_mirror,
-            )
+            try:
+                data = fetch_database_url(
+                    auth.platform.http_client,
+                    mirror,
+                    db_name=db_name,
+                    cached=cached,
+                    telemetry=telemetry,
+                    ecosystem=ecosystem,
+                    from_cache=from_cache,
+                    is_open_mirror=is_open_mirror,
+                )
+            except (NetworkConnectionError, RequestTimeoutError):
+                cached_data = use_cached_database()
+                if cached_data:
+                    return cached_data
+                raise
         else:
             data = fetch_database_file(
                 mirror, db_name=db_name, cached=cached, ecosystem=ecosystem
             )
         if data:
+            data = normalize_database_format(data, full)
             if is_valid_database(data):
+                if cached:
+                    write_to_cache(db_name, data)
+                record_database_metadata(
+                    data,
+                    source=mirror,
+                    offline=offline or not is_a_remote_mirror(mirror),
+                )
                 return data
             raise MalformedDatabase(
                 fetched_from=mirror,
                 reason=f"Not supported schema version. "
                 f"This Safety version supports only schema version {JSON_SCHEMA_VERSION}",
             )
+
+    if offline or not mirrors:
+        cached_data = use_cached_database()
+        if cached_data:
+            return cached_data
 
     raise DatabaseFetchError()
 
@@ -699,6 +970,8 @@ def check(
     telemetry: bool = True,
     params: Optional[Dict[str, Any]] = None,
     project: Optional[str] = None,
+    index_url: Optional[str] = None,
+    offline: bool = False,
 ) -> tuple:
     """
     Performs a vulnerability check on the provided packages.
@@ -716,12 +989,21 @@ def check(
         telemetry (bool): Whether to include telemetry data.
         params (Optional[Dict[str, Any]]): Additional parameters.
         project (Optional[str]): The project name.
+        index_url (Optional[str]): A private database index base URL or JSON URL.
+        offline (bool): Whether to disable network access.
 
     Returns:
         tuple: A tuple containing the list of vulnerabilities and the full database.
     """
     SafetyContext().command = "check"
-    db = fetch_database(auth=auth, db=db_mirror, cached=cached, telemetry=telemetry)
+    db = fetch_database(
+        auth=auth,
+        db=db_mirror,
+        cached=cached,
+        telemetry=telemetry,
+        index_url=index_url,
+        offline=offline,
+    )
     db_full = None
     vulnerable_packages = frozenset(db.get("vulnerable_packages", []))
     vulnerabilities = []
@@ -747,6 +1029,8 @@ def check(
                     db=db_mirror,
                     cached=cached,
                     telemetry=telemetry,
+                    index_url=index_url,
+                    offline=offline,
                 )
             pkg.refresh_from(db_full)
 
@@ -763,6 +1047,8 @@ def check(
                             db=db_mirror,
                             cached=cached,
                             telemetry=telemetry,
+                            index_url=index_url,
+                            offline=offline,
                         )
                     if not pkg.latest_version:
                         pkg.refresh_from(db_full)
@@ -1801,6 +2087,10 @@ def get_announcements(
     LOG.info("Getting announcements")
 
     announcements = []
+
+    if is_offline_mode() or getattr(SafetyContext(), "database_offline", False):
+        LOG.info("Skipping announcements because offline mode is enabled.")
+        return announcements
 
     url = f"{DATA_API_BASE_URL}announcements/"
     method = "post"

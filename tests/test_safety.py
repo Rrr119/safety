@@ -11,6 +11,7 @@ Tests for `safety` module.
 
 import json
 import os
+import tempfile
 import unittest
 from collections import defaultdict
 from http import HTTPStatus
@@ -29,12 +30,14 @@ from safety.errors import (
     DatabaseFileNotFoundError,
     InvalidCredentialError,
     MalformedDatabase,
+    NetworkConnectionError,
     ServerError,
     TooManyRequestsError,
 )
 from safety.formatter import SafetyFormatter
 from safety.models import CVE, Package, SafetyRequirement
 from safety.safety import (
+    build_database_url,
     calculate_remediations,
     check,
     compute_sec_ver,
@@ -46,8 +49,9 @@ from safety.safety import (
     precompute_remediations,
     read_vulnerabilities,
     review,
+    write_to_cache,
 )
-from safety.util import get_packages_licenses, read_requirements
+from safety.util import SafetyContext, get_packages_licenses, read_requirements
 from tests.resources import REMEDIATIONS, SCANNED_PACKAGES, VALID_REPORT, VULNS
 from tests.test_cli import get_vulnerability
 
@@ -151,6 +155,111 @@ class TestSafety(unittest.TestCase):
             telemetry=False,
         )
         self.assertEqual(len(vulns), 2)
+
+    @patch("safety.safety.fetch_database_url")
+    def test_check_from_single_full_database_file_offline(self, mock_fetch_db):
+        reqs = StringIO("Django==1.6")
+        packages = read_requirements(reqs)
+        db_path = os.path.join(self.dirname, "test_db", "insecure_full.json")
+
+        vulns, _ = check(
+            auth=self.auth,
+            packages=packages,
+            db_mirror=db_path,
+            cached=0,
+            ignore_vulns={},
+            ignore_severity_rules=None,
+            proxy={},
+            telemetry=False,
+            offline=True,
+        )
+
+        self.assertEqual(len(vulns), 2)
+        mock_fetch_db.assert_not_called()
+        context = SafetyContext()
+        self.assertEqual(context.database_version, "2.0.0")
+        self.assertEqual(context.database_source, db_path)
+        self.assertTrue(context.database_offline)
+
+    def test_fetch_database_offline_uses_cache(self):
+        with open(os.path.join(self.dirname, "test_db", "insecure.json")) as f:
+            cached_db = json.load(f)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_file = os.path.join(temp_dir, "cache.json")
+            with patch("safety.safety.DB_CACHE_FILE", cache_file):
+                write_to_cache("insecure.json", cached_db)
+                with patch("safety.safety.fetch_database_url") as mock_fetch_db:
+                    db = fetch_database(
+                        auth=self.auth,
+                        db=False,
+                        cached=0,
+                        telemetry=False,
+                        offline=True,
+                    )
+
+        mock_fetch_db.assert_not_called()
+        self.assertEqual(db["vulnerable_packages"]["django"], ["<1.9", "<1.8.3"])
+        self.assertEqual(SafetyContext().database_source, "cache:insecure.json")
+        self.assertTrue(SafetyContext().database_offline)
+
+    def test_fetch_database_falls_back_to_cache_on_network_error(self):
+        with open(os.path.join(self.dirname, "test_db", "insecure.json")) as f:
+            cached_db = json.load(f)
+
+        self.auth.platform.is_using_auth_credentials.return_value = False
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_file = os.path.join(temp_dir, "cache.json")
+            with patch("safety.safety.DB_CACHE_FILE", cache_file):
+                write_to_cache("insecure.json", cached_db)
+                with patch(
+                    "safety.safety.fetch_database_url",
+                    side_effect=NetworkConnectionError(),
+                ):
+                    db = fetch_database(
+                        auth=self.auth,
+                        db=False,
+                        cached=0,
+                        telemetry=False,
+                    )
+
+        self.assertEqual(db["vulnerable_packages"]["django"], ["<1.9", "<1.8.3"])
+        self.assertTrue(SafetyContext().database_offline)
+
+    @patch("safety.safety.fetch_database_url")
+    def test_fetch_database_uses_private_index(self, mock_fetch_db):
+        with open(os.path.join(self.dirname, "test_db", "insecure.json")) as f:
+            private_db = json.load(f)
+        mock_fetch_db.return_value = private_db
+
+        db = fetch_database(
+            auth=self.auth,
+            db=False,
+            index_url="https://packages.example.test/safety",
+            telemetry=False,
+        )
+
+        self.assertEqual(db["vulnerable_packages"]["django"], ["<1.9", "<1.8.3"])
+        self.assertEqual(
+            mock_fetch_db.call_args.args[1],
+            "https://packages.example.test/safety",
+        )
+        self.assertEqual(
+            SafetyContext().database_source,
+            "https://packages.example.test/safety",
+        )
+
+    def test_build_database_url_supports_base_and_direct_urls(self):
+        self.assertEqual(
+            build_database_url("https://example.test/safety", "insecure.json"),
+            "https://example.test/safety/insecure.json",
+        )
+        self.assertEqual(
+            build_database_url(
+                "https://example.test/safety/insecure.json", "insecure.json"
+            ),
+            "https://example.test/safety/insecure.json",
+        )
 
     def test_multiple_versions(self):
         # Probably used for external tools using check directly

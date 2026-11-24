@@ -74,6 +74,8 @@ Leveraging the industry's most comprehensive database of vulnerabilities and mal
 - `safety scan`: Perform a vulnerability scan in the current directory.
 - `safety system-scan`: Discover supply-chain assets on your development machine — AI assistants (e.g. Claude Code, Claude Desktop), dependencies, runtimes, environments, and developer tools. Available as part of the Safety commercial product — see [https://getsafety.com/](https://getsafety.com/).
 - `safety scan --apply-fixes`: Update vulnerable dependencies.
+- `safety check --db /path/to/db --offline`: Scan with a local vulnerability database without network access. Reports include the database version and timestamp.
+- `safety check --index-url https://packages.example.com/safety`: Load vulnerability data from a private index or mirror.
 
 # Service-Level Agreement (SLA)
 

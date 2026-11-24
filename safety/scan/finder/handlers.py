@@ -61,7 +61,13 @@ class FileHandler(ABC):
         return None
 
     @abstractmethod
-    def download_required_assets(self, auth: "Auth") -> None:
+    def download_required_assets(
+        self,
+        auth: "Auth",
+        db: Optional[str] = None,
+        index_url: Optional[str] = None,
+        offline: bool = False,
+    ) -> None:
         """
         Abstract method to download required assets for handling files. Should be implemented
         by subclasses.
@@ -83,7 +89,13 @@ class PythonFileHandler(FileHandler):
         super().__init__()
         self.ecosystem = Ecosystem.PYTHON
 
-    def download_required_assets(self, auth: "Auth") -> None:
+    def download_required_assets(
+        self,
+        auth: "Auth",
+        db: Optional[str] = None,
+        index_url: Optional[str] = None,
+        offline: bool = False,
+    ) -> None:
         """
         Downloads the required assets for handling Python files, specifically the Safety database.
 
@@ -92,29 +104,32 @@ class PythonFileHandler(FileHandler):
         """
         from safety.safety import fetch_database
 
-        SAFETY_DB_DIR = os.getenv("SAFETY_DB_DIR")
-
-        db = False if SAFETY_DB_DIR is None else SAFETY_DB_DIR
+        db = db or os.getenv("SAFETY_DB_DIR")
+        database_source = db if db else False
 
         # Fetch both the full and partial Safety databases
         fetch_database(
             auth=auth,
             full=False,
-            db=db,
+            db=database_source,
             cached=True,
             telemetry=True,
             ecosystem=Ecosystem.PYTHON,
             from_cache=False,
+            index_url=index_url,
+            offline=offline,
         )
 
         fetch_database(
             auth=auth,
             full=True,
-            db=db,
+            db=database_source,
             cached=True,
             telemetry=True,
             ecosystem=Ecosystem.PYTHON,
             from_cache=False,
+            index_url=index_url,
+            offline=offline,
         )
 
 
@@ -129,7 +144,13 @@ class SafetyProjectFileHandler(FileHandler):
         super().__init__()
         self.ecosystem = Ecosystem.SAFETY_PROJECT
 
-    def download_required_assets(self, auth: "Auth") -> None:
+    def download_required_assets(
+        self,
+        auth: "Auth",
+        db: Optional[str] = None,
+        index_url: Optional[str] = None,
+        offline: bool = False,
+    ) -> None:
         """
         No required assets to download for Safety project files.
         """

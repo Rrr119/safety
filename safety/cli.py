@@ -87,6 +87,7 @@ from safety.util import (
     get_fix_options,
     get_packages_licenses,
     get_processed_options,
+    has_explicit_database_source,
     html_alias,
     initialize_config_dirs,
     initialize_event_bus,
@@ -340,6 +341,21 @@ def print_deprecation_message(
     help="Path to a local or remote vulnerability database. Default: empty",
 )
 @click.option(
+    "--index-url",
+    "--db-index-url",
+    "index_url",
+    default="",
+    envvar=["SAFETY_DB_URL", "SAFETY_DB_INDEX_URL", "SAFETY_INDEX_URL"],
+    help="Base URL of a private vulnerability database index, or a full database JSON URL.",
+)
+@click.option(
+    "--offline",
+    is_flag=True,
+    default=False,
+    envvar="SAFETY_OFFLINE",
+    help="Never access the network; use --db, SAFETY_DB_DIR, or the local cache.",
+)
+@click.option(
     "--full-report/--short-report",
     default=False,
     cls=MutuallyExclusiveOption,
@@ -522,6 +538,8 @@ def print_deprecation_message(
 def check(
     ctx,
     db,
+    index_url,
+    offline,
     full_report,
     stdin,
     files,
@@ -588,6 +606,8 @@ def check(
         "auto_remediation_limit": auto_remediation_limit,
         "apply_remediations": apply_remediations,
         "ignore_unpinned_requirements": ignore_unpinned_requirements,
+        "index_url": index_url,
+        "offline": offline,
     }
 
     LOG.info("Calling the check function")
@@ -604,6 +624,8 @@ def check(
         is_env_scan=is_env_scan,
         telemetry=ctx.obj.config.telemetry_enabled,
         params=params,
+        index_url=index_url,
+        offline=offline,
     )
     LOG.debug("Vulnerabilities returned: %s", vulns)
     LOG.debug("full database returned is None: %s", db_full is None)
@@ -613,7 +635,9 @@ def check(
     remediations = safety_core.calculate_remediations(vulns, db_full)
 
     announcements = []
-    if not db or is_a_remote_mirror(db):
+    if not has_explicit_database_source(
+        db=db, index_url=index_url, offline=offline
+    ) and (not db or is_a_remote_mirror(db)):
         LOG.info("Not local DB used, Getting announcements")
         announcements = safety_core.get_announcements(
             auth=auth, telemetry=ctx.obj.config.telemetry_enabled
@@ -863,7 +887,12 @@ def generate_installation_policy(
         if handler.ecosystem:
             wait_msg = "Fetching Safety's vulnerability database..."
             with console.status(wait_msg, spinner=DEFAULT_SPINNER):
-                handler.download_required_assets(ctx.obj.auth)
+                handler.download_required_assets(
+                    ctx.obj.auth,
+                    db=getattr(ctx.obj, "db", None),
+                    index_url=getattr(ctx.obj, "db_index_url", None),
+                    offline=getattr(ctx.obj, "offline", False),
+                )
 
     wait_msg = "Scanning project directory"
     with console.status(wait_msg, spinner=DEFAULT_SPINNER):

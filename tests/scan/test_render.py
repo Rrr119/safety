@@ -11,6 +11,7 @@ from safety.scan.render import (
     render_header,
     prompt_project_id,
 )
+from safety.util import SafetyContext
 from safety_schemas.models import ProjectModel, IgnoreCodes, PolicySource
 
 
@@ -20,6 +21,7 @@ class TestRender(unittest.TestCase):
         self.project = ProjectModel(id="test-project")
         self.project.policy = MagicMock()
         self.project.policy.source = PolicySource.cloud
+        SafetyContext().database_version = None
 
     @patch("safety.scan.render.get_version")
     def test_render_header(self, mock_get_safety_version):
@@ -98,6 +100,7 @@ class TestRender(unittest.TestCase):
 
     @patch("safety.scan.render.render_to_console")
     def test_print_summary(self, mock_render_to_console):
+        SafetyContext().database_version = "2.0.0"
         ignored_vulns_data = [
             MagicMock(
                 ignored_code=IgnoreCodes.manual.value,
@@ -137,6 +140,7 @@ class TestRender(unittest.TestCase):
                 call(
                     "Tested [number]5[/number] dependencies for security issues using policy fetched from Safety Platform"
                 ),
+                call("Vulnerability database version: 2.0.0"),
                 call("0 security issues found, 0 fixes suggested."),
                 call(
                     "[number]0[/number] fixes suggested, resolving [number]0[/number] vulnerabilities."
@@ -159,6 +163,7 @@ class TestRender(unittest.TestCase):
                 call(
                     "Tested [number]5[/number] dependencies for security issues using policy fetched from Safety Platform"
                 ),
+                call("Vulnerability database version: 2.0.0"),
                 call("0 security issues found, 0 fixes suggested."),
                 call(
                     "[number]0[/number] fixes suggested, resolving [number]0[/number] vulnerabilities."

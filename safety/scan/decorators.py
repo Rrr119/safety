@@ -20,7 +20,7 @@ from safety.scan.util import GIT
 from ..codebase_utils import load_unverified_project_from_config
 
 
-from safety.util import build_telemetry_data
+from safety.util import build_telemetry_data, has_explicit_database_source
 from safety_schemas.models import (
     MetadataModel,
     ScanType,
@@ -56,13 +56,25 @@ def scan_project_command_init(func):
         ctx.obj.console = console
         ctx.params.pop("console", None)
 
+        db = kwargs.get("db", getattr(ctx.obj, "db", None))
+        db_index_url = kwargs.get(
+            "db_index_url", getattr(ctx.obj, "db_index_url", None)
+        )
+        offline = kwargs.get("offline", getattr(ctx.obj, "offline", False))
+        ctx.obj.db = db
+        ctx.obj.db_index_url = db_index_url
+        ctx.obj.offline = offline
+        using_external_database = has_explicit_database_source(
+            db=db, index_url=db_index_url, offline=offline
+        )
+
         if output.is_silent():
             console.quiet = True
 
         if not ctx.obj.auth:
             raise SafetyException("Authentication not initialized.")
 
-        if not ctx.obj.auth.is_valid():
+        if not ctx.obj.auth.is_valid() and not using_external_database:
             process_auth_status_not_ready(console=console, auth=ctx.obj.auth, ctx=ctx)
 
         upload_request_id = kwargs.pop("upload_request_id", None)
@@ -166,6 +178,9 @@ def scan_project_command_init(func):
         elif auth_type == "machine_token":
             machine_id = ctx.obj.auth.platform.machine_id or "unknown"
             details = {"Account": f"Machine token (machine:{machine_id})"}
+        elif using_external_database:
+            source = db_index_url or db or os.getenv("SAFETY_DB_DIR") or "cache"
+            details = {"Account": f"Offline - {source}"}
         else:
             details = {"Account": f"Offline - {os.getenv('SAFETY_DB_DIR')}"}
 

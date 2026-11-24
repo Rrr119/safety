@@ -8,6 +8,7 @@ from datetime import datetime
 from difflib import SequenceMatcher
 from threading import Lock
 from typing import TYPE_CHECKING, Any, Dict, Generator, List, Optional, Tuple, Union
+from urllib.parse import unquote, urlsplit
 
 import click
 from click import BadParameter
@@ -57,6 +58,127 @@ def is_a_remote_mirror(mirror: str) -> bool:
         bool: True if the mirror URL is remote, False otherwise.
     """
     return mirror.startswith("http://") or mirror.startswith("https://")
+
+
+def is_a_file_url(source: str) -> bool:
+    """
+    Check if a source points to a local file using the file:// scheme.
+
+    Args:
+        source (str): The database source.
+
+    Returns:
+        bool: True if the source is a file URL, False otherwise.
+    """
+    return source.startswith("file://")
+
+
+def file_url_to_path(source: str) -> str:
+    """
+    Convert a file:// URL into a local filesystem path.
+
+    Args:
+        source (str): The file URL.
+
+    Returns:
+        str: The local filesystem path.
+    """
+    parsed = urlsplit(source)
+    path = unquote(parsed.path)
+    if parsed.netloc and parsed.netloc not in ("", "localhost"):
+        path = f"//{parsed.netloc}{path}"
+    return path
+
+
+def is_offline_mode(offline: bool = False) -> bool:
+    """
+    Return whether Safety should avoid network access for database lookups.
+
+    The CLI flag takes precedence, while SAFETY_OFFLINE allows the same
+    behavior to be configured in CI or air-gapped environments.
+
+    Args:
+        offline (bool): Explicit offline setting.
+
+    Returns:
+        bool: True when offline mode is enabled.
+    """
+    if offline:
+        return True
+
+    value = os.getenv("SAFETY_OFFLINE", "")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def has_explicit_database_source(
+    db: Optional[str] = None, index_url: Optional[str] = None, offline: bool = False
+) -> bool:
+    """
+    Check whether an offline/local/private database source was configured.
+
+    Args:
+        db (Optional[str]): Explicit local or remote database path.
+        index_url (Optional[str]): Explicit private database index URL.
+        offline (bool): Whether offline mode was requested.
+
+    Returns:
+        bool: True when a non-default database source is configured.
+    """
+    def is_configured(value: Any) -> bool:
+        return isinstance(value, str) and bool(value)
+
+    return bool(
+        is_configured(db)
+        or is_configured(index_url)
+        or offline is True
+        or is_offline_mode()
+        or os.getenv("SAFETY_DB_DIR")
+        or os.getenv("SAFETY_DB_URL")
+        or os.getenv("SAFETY_DB_INDEX_URL")
+        or os.getenv("SAFETY_INDEX_URL")
+    )
+
+
+def extract_database_metadata(
+    db: Dict[str, Any], source: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Extract normalized version metadata from a vulnerability database.
+
+    Safety databases expose their version through different fields across
+    server and mirror deployments. Prefer an explicit database version, then
+    fall back to the schema version so every report identifies the data used.
+
+    Args:
+        db (Dict[str, Any]): The vulnerability database.
+        source (Optional[str]): The local path or URL used to load the database.
+
+    Returns:
+        Dict[str, Any]: Normalized database metadata.
+    """
+    meta = db.get("meta", {})
+    if not isinstance(meta, dict):
+        meta = {}
+
+    version = (
+        meta.get("database_version")
+        or meta.get("db_version")
+        or meta.get("version")
+        or meta.get("schema_version")
+        or meta.get("last_updated")
+        or meta.get("timestamp")
+        or "unknown"
+    )
+    if not isinstance(version, (str, int, float)):
+        version = str(version)
+
+    return {
+        "database_version": str(version),
+        "database_schema_version": meta.get("schema_version"),
+        "database_last_updated": meta.get("last_updated"),
+        "database_timestamp": meta.get("timestamp"),
+        "database_source": source,
+    }
 
 
 def is_supported_by_parser(path: str) -> bool:
@@ -1226,6 +1348,14 @@ class SafetyContext(metaclass=SingletonMeta):
     local_announcements = []
     scanned_full_path = []
     account = None
+    index_url = None
+    offline = False
+    database_version = None
+    database_schema_version = None
+    database_last_updated = None
+    database_timestamp = None
+    database_source = None
+    database_offline = False
 
 
 def sync_safety_context(f):

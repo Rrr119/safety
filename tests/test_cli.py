@@ -303,6 +303,57 @@ class TestSafetyCLI(unittest.TestCase):
         }
         self.assertEqual(check_call_kwargs["ignore_vulns"], ignored_transformed)
 
+    def test_check_offline_local_database_labels_version(self):
+        dirname = os.path.dirname(__file__)
+        reqs_path = os.path.join(dirname, "reqs_4.txt")
+        db_path = os.path.join(dirname, "test_db")
+
+        result = self.runner.invoke(
+            self.cli,
+            [
+                "check",
+                "-r",
+                reqs_path,
+                "--db",
+                db_path,
+                "--offline",
+                "--output",
+                "json",
+                "--continue-on-error",
+            ],
+        )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn('"database_version": "2.0.0"', result.stdout)
+        self.assertIn('"offline": true', result.stdout)
+        self.mock_fetch_database_url.assert_not_called()
+
+    def test_check_uses_private_index_url(self):
+        dirname = os.path.dirname(__file__)
+        reqs_path = os.path.join(dirname, "reqs_4.txt")
+        index_url = "https://packages.example.test/safety"
+
+        result = self.runner.invoke(
+            self.cli,
+            [
+                "check",
+                "-r",
+                reqs_path,
+                "--index-url",
+                index_url,
+                "--output",
+                "json",
+                "--continue-on-error",
+            ],
+        )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(
+            self.mock_fetch_database_url.call_args.args[1],
+            index_url,
+        )
+        self.assertIn('"database_version": "2.0.0"', result.stdout)
+
     def test_validate_with_unsupported_argument(self):
         result = self.runner.invoke(self.cli, ["validate", "safety_ci"])
         msg = 'This Safety version only supports "policy_file" validation. "safety_ci" is not supported.\n'

@@ -6,7 +6,9 @@ from packaging.version import Version
 from safety.auth.models import Auth
 from safety.cli import cli
 from safety.console import main_console as console
-from unittest.mock import patch
+from safety.errors import SafetyError
+from safety.scan.command import validate_authentication
+from unittest.mock import Mock, patch
 
 
 class TestScanCommand(unittest.TestCase):
@@ -36,6 +38,27 @@ class TestScanCommand(unittest.TestCase):
 
     def tearDown(self):
         self.machine_creds_patcher.stop()
+
+    def test_validate_authentication_allows_offline_database(self):
+        ctx = Mock()
+        ctx.obj.metadata.authenticated = False
+        ctx.obj.db = "/tmp/safety-db"
+        ctx.obj.db_index_url = None
+        ctx.obj.offline = True
+
+        with patch.dict("os.environ", {}, clear=True):
+            validate_authentication(ctx)
+
+    def test_validate_authentication_requires_auth_without_database(self):
+        ctx = Mock()
+        ctx.obj.metadata.authenticated = False
+        ctx.obj.db = None
+        ctx.obj.db_index_url = None
+        ctx.obj.offline = False
+
+        with patch.dict("os.environ", {}, clear=True):
+            with self.assertRaises(SafetyError):
+                validate_authentication(ctx)
 
     @patch.object(Auth, "is_valid", return_value=False)
     @patch(

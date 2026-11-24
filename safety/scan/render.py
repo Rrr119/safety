@@ -31,7 +31,12 @@ from safety.errors import SafetyException
 from safety.meta import get_version
 from safety.output_utils import parse_html
 from safety.scan.constants import DEFAULT_SPINNER
-from safety.util import clean_project_id, get_basic_announcements
+from safety.util import (
+    SafetyContext,
+    clean_project_id,
+    get_basic_announcements,
+    has_explicit_database_source,
+)
 
 if TYPE_CHECKING:
     from safety.cli_util import CustomContext
@@ -87,6 +92,13 @@ def print_announcements(console: Console, ctx: "SafetyContext"):
         ctx (typer.Context): The context of the Typer command.
     """
     colors = {"error": "red", "warning": "yellow", "info": "default"}
+
+    if has_explicit_database_source(
+        db=getattr(ctx.obj, "db", None),
+        index_url=getattr(ctx.obj, "db_index_url", None),
+        offline=getattr(ctx.obj, "offline", False),
+    ):
+        return
 
     announcements = safety.get_announcements(
         ctx.obj.auth,
@@ -239,6 +251,10 @@ def print_summary(
     console.print(
         f"Tested [number]{dependencies_count}[/number] {pluralize('dependency', dependencies_count)} for security issues using {policy_msg}"
     )
+
+    database_version = SafetyContext().database_version
+    if database_version:
+        console.print(f"Vulnerability database version: {database_version}")
 
     if total_issues_with_duplicates == 0:
         console.print("0 security issues found, 0 fixes suggested.")

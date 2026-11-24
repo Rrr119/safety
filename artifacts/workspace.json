@@ -1,0 +1,17 @@
+{
+  "root": "/home/dev/feedback/uid36761",
+  "B": "/home/dev/feedback/uid36761",
+  "sha": "979714676aa7230d9c4686936d45a4ef3851fa71",
+  "wslDistro": "Ubuntu-26.04",
+  "source": {
+    "owner": "pyupio",
+    "repo": "safety",
+    "sha": "979714676aa7230d9c4686936d45a4ef3851fa71"
+  },
+  "fork": {
+    "owner": "Rrr119",
+    "repo": "safety",
+    "cloneUrl": "https://github.com/Rrr119/safety.git"
+  },
+  "at": "2026-11-24T03:40:19.772Z"
+}

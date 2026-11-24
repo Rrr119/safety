@@ -1041,6 +1041,7 @@ def build_report_for_review_vuln_report(
         None,
         report_from_file.get("api_key", None),
         report_from_file.get("local_database_path_used", None),
+        database_version=report_from_file.get("database_version"),
     )
     scanned_count_sentence = build_scanned_count_sentence(packages)
     old_timestamp = report_from_file.get("timestamp", None)
@@ -1083,7 +1084,10 @@ def build_report_for_review_vuln_report(
 
 
 def build_using_sentence(
-    account: Optional[str], key: Optional[str], db: Optional[str]
+    account: Optional[str],
+    key: Optional[str],
+    db: Optional[str],
+    database_version: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     Build the sentence for the used components.
@@ -1092,6 +1096,7 @@ def build_using_sentence(
         account (Optional[str]): The account details.
         key (Optional[str]): The API key.
         db (Optional[str]): The database details.
+        database_version (Optional[str]): The loaded database version.
 
     Returns:
         List[Dict[str, Any]]: Sentence for the used components.
@@ -1118,6 +1123,10 @@ def build_using_sentence(
         db_name = "open-source vulnerability"
 
     database_sentence = [{"style": True, "value": db_name + " database"}]
+    if database_version:
+        database_sentence.append(
+            {"style": False, "value": f" (version {database_version})"}
+        )
 
     return [{"style": False, "value": "Using "}] + key_sentence + database_sentence
 
@@ -1296,6 +1305,16 @@ def get_report_brief_info(as_dict: bool = False, report_type: int = 1, **kwargs:
     brief_data["api_key"] = bool(key)
     brief_data["account"] = account
     brief_data["local_database_path"] = db if db else None
+    brief_data["database_version"] = getattr(context, "database_version", None)
+    brief_data["database_schema_version"] = getattr(
+        context, "database_schema_version", None
+    )
+    brief_data["database_last_updated"] = getattr(
+        context, "database_last_updated", None
+    )
+    brief_data["database_timestamp"] = getattr(context, "database_timestamp", None)
+    brief_data["database_source"] = getattr(context, "database_source", None)
+    brief_data["offline"] = getattr(context, "database_offline", False)
     brief_data["safety_version"] = get_version()
     brief_data["timestamp"] = current_time
     brief_data["packages_found"] = len(packages)
@@ -1361,7 +1380,12 @@ def get_report_brief_info(as_dict: bool = False, report_type: int = 1, **kwargs:
 
     brief_data["json_version"] = "1.1"
 
-    using_sentence = build_using_sentence(account, key, db)
+    using_sentence = build_using_sentence(
+        account,
+        key,
+        db,
+        database_version=getattr(context, "database_version", None),
+    )
     sentence_array = []
     for section in using_sentence:
         sentence_array.append(section["value"])
